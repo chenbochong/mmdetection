@@ -96,7 +96,9 @@ class QuadROICrop(BaseTransform):
         ratio = 16 / max(ph, pw)
         nw, nh = max(1, round(pw * ratio)), max(1, round(ph * ratio))
         interpolation = cv2.INTER_AREA if ratio < 1 else cv2.INTER_LINEAR
-        resized = cv2.resize(packed, (nw, nh), interpolation=interpolation)
+        resized = np.stack([
+            cv2.resize(packed[..., c], (nw, nh), interpolation=interpolation)
+            for c in range(16)], axis=-1)
         px, py = (16 - nw) // 2, (16 - nh) // 2
         canvas = np.zeros((16, 16, 16), dtype=np.float32)
         canvas[py:py + nh, px:px + nw] = resized

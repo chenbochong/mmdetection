@@ -120,9 +120,11 @@ class QuadROIDetector(BaseDetector):
         candidates.bboxes[:, 1::2].clamp_(0, 480)
         candidates = candidates[(candidates.bboxes[:, 2:] >
                                   candidates.bboxes[:, :2]).all(dim=1)]
-        _, keep = batched_nms(candidates.bboxes, candidates.scores, candidates.labels,
-                              dict(type='nms', iou_threshold=self.nms_iou))
-        result = candidates[keep[:self.max_per_img]]
+        result = candidates
+        if len(candidates):
+            _, keep = batched_nms(candidates.bboxes, candidates.scores, candidates.labels,
+                                  dict(type='nms', iou_threshold=self.nms_iou))
+            result = candidates[keep[:self.max_per_img]]
         count = len(result)
         result.ambient_score = self._matched_score(result.bboxes, ambient)[0]
         result.hd_support = result.scores.new_zeros(count)
