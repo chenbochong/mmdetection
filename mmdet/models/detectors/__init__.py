@@ -61,7 +61,10 @@ from .yolox import YOLOX
 
 from .dual_stream import DualStreamDetector
 
+from .quad_roi_detector import QuadROIDetector
+
 __all__ = [
+    'QuadROIDetector',
     'ATSS', 'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
     'KnowledgeDistillationSingleStageDetector', 'FastRCNN', 'FasterRCNN',
     'MaskRCNN', 'CascadeRCNN', 'HybridTaskCascade', 'RetinaNet', 'FCOS',

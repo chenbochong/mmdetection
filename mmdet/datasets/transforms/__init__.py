@@ -26,7 +26,10 @@ from .wrappers import MultiBranch, ProposalBroadcaster, RandomOrder
 
 from .pack_ambient import PackAmbient
 
+from .quad_roi_crop import QuadROICrop
+
 __all__ = [
+    'QuadROICrop',
     'PackDetInputs', 'ToTensor', 'ImageToTensor', 'Transpose',
     'LoadImageFromNDArray', 'LoadAnnotations', 'LoadPanopticAnnotations',
     'LoadMultiChannelImageFromFiles', 'LoadProposals', 'Resize', 'RandomFlip',

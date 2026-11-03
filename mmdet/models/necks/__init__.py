@@ -22,7 +22,10 @@ from .yolox_pafpn import YOLOXPAFPN
 from .lite_neck import LiteNeck
 
 
+from .quad_roi_fusion import QuadROIFusion
+
 __all__ = [
+    'QuadROIFusion',
     'FPN', 'BFP', 'ChannelMapper', 'HRFPN', 'NASFPN', 'FPN_CARAFE', 'PAFPN',
     'NASFCOS_FPN', 'RFP', 'YOLOV3Neck', 'FPG', 'DilatedEncoder',
     'CTResNetNeck', 'SSDNeck', 'YOLOXPAFPN', 'DyHead', 'CSPNeXtPAFPN', 'SSH',

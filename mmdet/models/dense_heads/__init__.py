@@ -55,7 +55,10 @@ from .yolox_head import YOLOXHead
 
 from .lite_head import LiteHead
 
+from .quad_roi_head import QuadROICenterHead
+
 __all__ = [
+    'QuadROICenterHead',
     'AnchorFreeHead', 'AnchorHead', 'GuidedAnchorHead', 'FeatureAdaption',
     'RPNHead', 'GARPNHead', 'RetinaHead', 'RetinaSepBNHead', 'GARetinaHead',
     'SSDHead', 'FCOSHead', 'RepPointsHead', 'FoveaHead',
