@@ -11,8 +11,12 @@ from mmdet.structures.bbox import bbox_overlaps
 
 @MODELS.register_module()
 class QuadROICenterHead(BaseModule):
-    def __init__(self, channels=24, init_cfg=None):
+    def __init__(self, channels=24, direct_regression=False,
+                 offset_weight=1.0, wh_weight=0.1, init_cfg=None):
         super().__init__(init_cfg)
+        self.direct_regression = direct_regression
+        self.offset_weight = offset_weight
+        self.wh_weight = wh_weight
         self.output = nn.Conv2d(channels, 6, 1)
         nn.init.normal_(self.output.weight, std=0.01)
         nn.init.zeros_(self.output.bias)
@@ -69,7 +73,18 @@ class QuadROICenterHead(BaseModule):
         targets = target.permute(0, 2, 3, 1)[positive]
         iou = bbox_overlaps(decoded, targets, is_aligned=True)
         loss_box = 2 * (1 - iou).sum() / count
-        loss_box += F.l1_loss(decoded, targets, reduction='sum') / count
+        if self.direct_regression:
+            grid_boxes = targets * scale
+            centers = (grid_boxes[:, :2] + grid_boxes[:, 2:]) / 2
+            offsets = centers - centers.floor()
+            sizes = grid_boxes[:, 2:] - grid_boxes[:, :2]
+            selected = pred.permute(0, 2, 3, 1)[positive]
+            loss_box += self.offset_weight * F.l1_loss(
+                selected[:, 3:5].sigmoid(), offsets, reduction='sum') / count
+            loss_box += self.wh_weight * F.l1_loss(
+                selected[:, 1:3].relu() + 1e-3, sizes, reduction='sum') / count
+        else:
+            loss_box += F.l1_loss(decoded, targets, reduction='sum') / count
         quality = pred[:, 5][positive]
         loss_quality = F.binary_cross_entropy_with_logits(
             quality, iou.detach(), reduction='sum') / count
