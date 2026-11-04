@@ -51,6 +51,14 @@ Ambient 的 stride 相对于输入是 2/4/8，相对于 VGA 是 16/32/64。
 `partial_prob`、`partial_fraction` 可配置；GT 完整框不随 ROI 截断，ROI 四角最后对齐到 4 的倍数。
 常规验证不额外施加这种截断。
 
+ROI 上下文对齐统一使用像素边界坐标：16×16 packed 输入的像素中心为
+`(i+0.5)/16`，stride-2 卷积第 j 个输出的名义中心为 `(2j+0.5)/16`。
+通过现有 resize/letterbox affine 映射回 VGA 后，以 ambient 首像素中心
+`(2.5, 0.5)` 和 P2 的 16 像素步长计算双线性采样坐标。
+有效区域 mask 同样使用这些坐标；ROI 四角继续按 4 的倍数对齐。
+本次对齐修正只需同步 `mmdet/models/detectors/quad_roi_detector.py`，
+重启训练进程后可用原 v3 checkpoint 继续训练，权重形状兼容。
+
 训练与验证共用 `(40, 130)` VGA 高度分档和 `min_gt_area=64`。
 训练小、中、大 GT 候选保留概率仍为 `(0.85, 0.65, 0.3)`，验证改为 `(1.0, 0.8, 0.3)`；
 这些是进入候选的概率，最终仍受 dropout（仅训练）、合并和 8 个名额限制。

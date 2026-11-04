@@ -33,14 +33,15 @@ class QuadROIDetector(BaseDetector):
 
     @staticmethod
     def _align_context(ambient, batch, boxes, affine, size):
-        t = (torch.arange(size, device=ambient.device, dtype=ambient.dtype) + 0.5) / size
+        # ROI stride-2 convolution centers: packed input indices 0, 2, ...
+        t = (torch.arange(size, device=ambient.device, dtype=ambient.dtype) + 0.25) / size
         y, x = torch.meshgrid(t, t, indexing='ij')
         xy = torch.stack((x, y), dim=-1)[None]
         world = (xy - affine[:, None, None, 2:]) / affine[:, None, None, :2]
         valid = ((world >= boxes[:, None, None, :2]) &
                  (world < boxes[:, None, None, 2:])).all(dim=-1)[:, None]
-        # Ambient samples start at VGA (2, 0); the encoder has stride 2.
-        grid = (world - world.new_tensor([2, 0])) / 16
+        # In VGA boundary coordinates, ambient[0, 0] is centered at (2.5, 0.5).
+        grid = (world - world.new_tensor([2.5, 0.5])) / 16
         grid = 2 * (grid + 0.5) / world.new_tensor(
             [ambient.shape[3], ambient.shape[2]]) - 1
         context = F.grid_sample(ambient[batch], grid, align_corners=False,
