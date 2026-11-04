@@ -14,7 +14,7 @@ class QuadROICrop(BaseTransform):
                  keep_probs=(0.85, 0.65, 0.3), area_thresholds=(4096, 32768),
                  roi_scale=(0.9, 1.4), shift=0.15, random_rois=(0, 3),
                  no_roi_prob=0.15, label_free_prob=0.2, pseudo_rois=True,
-                 seed=2026):
+                 seed=2026, height_thresholds=None, merge_cfg=None):
         self.training = training
         self.max_rois = max_rois
         self.crop_scale = crop_scale
@@ -27,6 +27,8 @@ class QuadROICrop(BaseTransform):
         self.label_free_prob = label_free_prob
         self.pseudo_rois = pseudo_rois
         self.seed = seed
+        self.height_thresholds = height_thresholds
+        self.merge_cfg = merge_cfg
 
     def _vga(self, image, boxes, rng):
         height, width = image.shape[:2]
@@ -61,6 +63,59 @@ class QuadROICrop(BaseTransform):
         hi = np.clip(np.ceil(np.asarray(box[2:]) / 4) * 4, lo + 4, [640, 480])
         return np.r_[lo, hi].astype(np.float32)
 
+    def _jitter(self, box, rng):
+        size = box[2:] - box[:2]
+        center = (box[:2] + box[2:]) / 2
+        center += rng.uniform(-self.shift, self.shift, 2) * size
+        size = size * rng.uniform(*self.roi_scale, size=2)
+        return self._align(np.r_[center - size / 2, center + size / 2])
+
+    @staticmethod
+    def _enclose(boxes):
+        return np.r_[boxes[:, :2].min(axis=0), boxes[:, 2:].max(axis=0)]
+
+    def _merge(self, rois):
+        cfg = self.merge_cfg
+        areas = (rois[:, 2:] - rois[:, :2]).prod(axis=1)
+        remaining = list(np.argsort(areas, kind='stable'))
+        groups = []
+        while remaining:
+            indices = [remaining.pop(0)]
+            while len(indices) < cfg['max_members']:
+                best, best_cost = None, float('inf')
+                for index in remaining:
+                    members = rois[indices + [index]]
+                    sizes = members[:, 2:] - members[:, :2]
+                    if (sizes.max(axis=0) / sizes.min(axis=0)).max() > cfg['size_ratio']:
+                        continue
+                    gap = np.maximum(0, np.maximum(members[:-1, :2], members[-1, :2]) -
+                                     np.minimum(members[:-1, 2:], members[-1, 2:]))
+                    gap = (gap / np.minimum(sizes[:-1], sizes[-1])).max(axis=1).min()
+                    if gap > cfg['gap_ratio']:
+                        continue
+                    extent = self._enclose(members)
+                    size = extent[2:] - extent[:2]
+                    cost = size.prod() / sizes.prod(axis=1).sum()
+                    if cost > cfg['area_ratio']:
+                        continue
+                    # Allow for the largest jitter and outward 4-pixel alignment.
+                    longest = size.max() * max(self.roi_scale) + 8
+                    if sizes[:, 1].min() * 64 / longest < cfg['min_height']:
+                        continue
+                    centers = (members[:, :2] + members[:, 2:]) / 2
+                    distance = np.abs(centers[:, None] - centers[None]).max(axis=2)
+                    distance = distance[np.triu_indices(len(members), k=1)].min()
+                    if distance * 8 / longest < cfg['min_center_distance']:
+                        continue
+                    if cost < best_cost:
+                        best, best_cost = index, cost
+                if best is None:
+                    break
+                indices.append(best)
+                remaining.remove(best)
+            groups.append(rois[indices])
+        return groups
+
     def _propose(self, boxes, rng):
         if rng.rand() < self.no_roi_prob:
             return np.empty((0, 4), dtype=np.float32)
@@ -68,20 +123,27 @@ class QuadROICrop(BaseTransform):
         if rng.rand() >= self.label_free_prob:
             for box in boxes:
                 size = box[2:] - box[:2]
-                group = np.searchsorted(self.area_thresholds, size.prod())
+                if self.height_thresholds is None:
+                    group = np.searchsorted(self.area_thresholds, size.prod())
+                else:
+                    group = np.searchsorted(self.height_thresholds, size[1], side='right')
                 if rng.rand() >= self.keep_probs[group]:
                     continue
-                center = (box[:2] + box[2:]) / 2
-                center += rng.uniform(-self.shift, self.shift, 2) * size
-                size = size * rng.uniform(*self.roi_scale, size=2)
-                rois.append(self._align(np.r_[center - size / 2, center + size / 2]))
+                rois.append(self._jitter(box, rng) if self.merge_cfg is None else box)
         for _ in range(rng.randint(self.random_rois[0], self.random_rois[1] + 1)):
             size = np.array([rng.uniform(20, 180), rng.uniform(32, 280)])
             center = rng.uniform(size / 2, [640, 480] - size / 2)
             rois.append(self._align(np.r_[center - size / 2, center + size / 2]))
         rois = np.unique(np.asarray(rois, dtype=np.float32).reshape(-1, 4), axis=0)
+        counts = np.ones(len(rois), dtype=int)
+        if self.merge_cfg is not None:
+            groups = self._merge(rois)
+            counts = np.array([len(group) for group in groups])
+            rois = np.asarray([self._jitter(self._enclose(group), rng) for group in groups],
+                              dtype=np.float32).reshape(-1, 4)
         area = (rois[:, 2:] - rois[:, :2]).prod(axis=1)
-        return rois[np.argsort(area, kind='stable')[:self.max_rois]]
+        order = np.lexsort((area, counts == 1))
+        return rois[order[:self.max_rois]]
 
     @staticmethod
     def _pack_roi(image, box):
