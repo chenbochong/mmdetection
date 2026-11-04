@@ -1,9 +1,14 @@
 # Quad ROI v2 fine-tuning
 
 Sync `mmdet/datasets/transforms/quad_roi_crop.py`,
-`mmdet/models/dense_heads/quad_roi_head.py` and
+`mmdet/models/dense_heads/quad_roi_head.py`,
+`mmdet/evaluation/metrics/quad_roi_coco_metric.py`,
+`mmdet/evaluation/metrics/__init__.py` and
 `configs/ambient_train/quad_roi_detector_v2.py` to the training computer.
 The v2 config inherits `quad_roi_detector.py`; keep that base config present.
+Custom bbox evaluation is contained in `QuadROICocoMetric`; `coco_metric.py`
+remains unchanged. If you synced the earlier modified `coco_metric.py`, replace
+it once with the restored version from this project.
 
 V2 retains all network shapes, weights, inference operators and source outputs.
 It changes ROI sampling, training supervision, the fine-tuning schedule and
@@ -28,19 +33,37 @@ evaluation settings. The original config keeps the original loss because
 
 ## ROI candidates and grouping
 
-`roi_settings.height_thresholds=(40, 80)` uses person-box height after the VGA
+`min_gt_area=64` removes GT boxes with VGA width * height < 64 after crop,
+resize and clipping, before creating targets or ROI candidates. The area cutoff
+retains boxes exactly at 64; it does not require both sides to be at least 8px.
+Removed people are treated as background, including in validation: detections
+there can count as false positives. `QuadROICocoMetric` filters its in-memory GT
+with the same validation VGA mapping and cutoff, preserving original COCO
+coordinates, annotation areas, and images without remaining people. The source
+annotation JSON is unchanged. Training, validation and test share this setting.
+
+The shared `height_thresholds=(40, 80)` uses person-box height after the VGA
 transform: small < 40px, medium 40px to < 80px, large >= 80px. These approximate
 >10m, 5-10m and <5m for a standing 1.7m person, a 640x480 image and a 120-degree
 diagonal rectilinear field of view. The projected heights at 10m and 5m are about
 39px and 79px. COCO has no distance labels; this is a configurable size proxy,
-not a depth measurement. When `height_thresholds=None`, the transform uses the
-original `area_thresholds` instead.
+not a depth measurement.
+
+Validation/test `bbox_mAP_s`, `bbox_mAP_m`, `bbox_mAP_l` and the printed size-group
+AR now use these VGA height groups, replacing COCO's original area bins. Exactly
+40px belongs to medium and exactly 80px belongs to large. The evaluator applies
+the same height ranges to GT and unmatched detections. Original boxes still
+determine IoU, and overall AP/AP50 retain their existing definition after the
+minimum-GT-area filter. The grouped AP/AR still average IoU 0.50:0.95; they are
+not AP50-only metrics. Each evaluation logs the configured height boundaries.
+Change the shared height thresholds in the v2 config to update ROI sampling and
+evaluation together; old COCO size-group results are not directly comparable.
 
 - Training retains keep probabilities `(0.85, 0.65, 0.3)`, 0-3 random candidates,
   whole-frame ROI dropout and label-free sampling.
 - Validation/test use keep probabilities `(1, 1, 0)`, 0-2 random candidates and
   no whole-frame or GT-candidate dropout. Large GT boxes never generate their own
-  candidates, but may fall inside a random or grouped ROI. All GT boxes still
+  candidates, but may fall inside a random or grouped ROI. All retained GT boxes still
   participate in detection evaluation.
 - All candidates, including random ones, use the same deterministic greedy
   grouping: start with the smallest remaining candidate and add the eligible
@@ -49,7 +72,7 @@ original `area_thresholds` instead.
   scales and translation, then align all four boundaries to multiples of four.
 - Rank grouped ROIs before singletons, then by final area ascending within each
   class, and retain at most eight. Groups of two and three have the same priority.
-  All small/medium GT boxes enter validation candidates; the final budget can
+  All retained small/medium GT boxes enter validation candidates; the final budget can
   still leave some without HD coverage. Validation uses a fixed per-image seed.
 
 The shared `roi_settings.merge_cfg` exposes:

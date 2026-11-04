@@ -14,7 +14,8 @@ class QuadROICrop(BaseTransform):
                  keep_probs=(0.85, 0.65, 0.3), area_thresholds=(4096, 32768),
                  roi_scale=(0.9, 1.4), shift=0.15, random_rois=(0, 3),
                  no_roi_prob=0.15, label_free_prob=0.2, pseudo_rois=True,
-                 seed=2026, height_thresholds=None, merge_cfg=None):
+                 seed=2026, height_thresholds=None, merge_cfg=None,
+                 min_gt_area=0):
         self.training = training
         self.max_rois = max_rois
         self.crop_scale = crop_scale
@@ -29,6 +30,7 @@ class QuadROICrop(BaseTransform):
         self.seed = seed
         self.height_thresholds = height_thresholds
         self.merge_cfg = merge_cfg
+        self.min_gt_area = min_gt_area
 
     def _vga(self, image, boxes, rng):
         height, width = image.shape[:2]
@@ -177,7 +179,8 @@ class QuadROICrop(BaseTransform):
         boxes = results.get('gt_bboxes', np.empty((0, 4), dtype=np.float32))
         flags = results.get('gt_ignore_flags', np.zeros(len(boxes), dtype=bool))
         image, boxes, scale, offset = self._vga(image, boxes, rng)
-        good = ((boxes[:, 2:] - boxes[:, :2]) >= 2).all(axis=1)
+        sizes = boxes[:, 2:] - boxes[:, :2]
+        good = (sizes >= 2).all(axis=1) & (sizes.prod(axis=1) >= self.min_gt_area)
         boxes, flags = boxes[good], flags[good]
         if 'roi_boxes' in results:
             # Supplied ROI coordinates are already in the VGA sensor frame.

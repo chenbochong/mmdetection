@@ -12,9 +12,11 @@ param_scheduler = [
     dict(type='CosineAnnealingLR', T_max=max_epochs, eta_min=0.00001,
          by_epoch=True, begin=0, end=max_epochs)]
 
+min_gt_area = 64
+height_thresholds = (40, 80)  # Approx. 10m / 5m, 120-degree diagonal FOV, 1.7m person.
 roi_settings = dict(
-    max_rois=8,
-    height_thresholds=(40, 80),  # Approx. 10m / 5m, 120-degree diagonal FOV, 1.7m person.
+    max_rois=8, min_gt_area=min_gt_area,
+    height_thresholds=height_thresholds,
     merge_cfg=dict(
         max_members=3, size_ratio=1.5, gap_ratio=0.5, area_ratio=1.5,
         min_height=24, min_center_distance=2.0))  # 64px input / 8x8 head units.
@@ -30,6 +32,11 @@ val_pipeline[-1].update(
     no_roi_prob=0.0, label_free_prob=0.0)
 val_dataloader = dict(dataset=dict(pipeline=val_pipeline))
 test_dataloader = dict(dataset=dict(pipeline=val_pipeline))
+
+val_evaluator = dict(type='QuadROICocoMetric', min_gt_area=min_gt_area,
+                     height_thresholds=height_thresholds)
+test_evaluator = dict(type='QuadROICocoMetric', min_gt_area=min_gt_area,
+                      height_thresholds=height_thresholds)
 
 default_hooks = dict(checkpoint=dict(save_best='coco/bbox_mAP_50', rule='greater'))
 
