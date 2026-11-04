@@ -16,7 +16,8 @@ class QuadROICrop(BaseTransform):
                  no_roi_prob=0.15, label_free_prob=0.2, pseudo_rois=True,
                  seed=2026, height_thresholds=None, merge_cfg=None,
                  min_gt_area=0, partial_prob=0.0, partial_fraction=(0.3, 0.6),
-                 matched_negatives=False, negative_attempts=32):
+                 matched_negatives=False, negative_attempts=32,
+                 hard_negative_slots=0):
         self.training = training
         self.max_rois = max_rois
         self.crop_scale = crop_scale
@@ -36,6 +37,7 @@ class QuadROICrop(BaseTransform):
         self.partial_fraction = partial_fraction
         self.matched_negatives = matched_negatives
         self.negative_attempts = negative_attempts
+        self.hard_negative_slots = hard_negative_slots
 
     def _vga(self, image, boxes, rng):
         height, width = image.shape[:2]
@@ -70,13 +72,13 @@ class QuadROICrop(BaseTransform):
         hi = np.clip(np.ceil(np.asarray(box[2:]) / 4) * 4, lo + 4, [640, 480])
         return np.r_[lo, hi].astype(np.float32)
 
-    def _jitter(self, box, rng):
+    def _jitter(self, box, rng, partial=True):
         size = box[2:] - box[:2]
         center = (box[:2] + box[2:]) / 2
         center += rng.uniform(-self.shift, self.shift, 2) * size
         size = size * rng.uniform(*self.roi_scale, size=2)
         roi = np.r_[center - size / 2, center + size / 2]
-        if self.partial_prob and rng.rand() < self.partial_prob:
+        if partial and self.partial_prob and rng.rand() < self.partial_prob:
             axis = rng.randint(2)
             length = size[axis] * rng.uniform(*self.partial_fraction)
             if rng.rand() < 0.5:
@@ -150,7 +152,27 @@ class QuadROICrop(BaseTransform):
             groups.append(indices)
         return groups
 
-    def _propose(self, boxes, occupied, bounds, rng):
+    def _hard_rois(self, boxes, occupied, bounds, rng):
+        candidates = [box for box in boxes if not self._intersects(box, occupied)]
+        candidates = np.unique(np.asarray(candidates, dtype=np.float32).reshape(-1, 4), axis=0)
+        candidates = candidates[rng.permutation(len(candidates))[:self.max_rois]]
+        groups = (self._merge(candidates) if self.merge_cfg is not None else
+                  [[i] for i in range(len(candidates))])
+        rois, counts = [], []
+        for group in groups:
+            roi = self._jitter(self._enclose(candidates[group]), rng, partial=False)
+            outside = (roi[:2] < bounds[:2]).any() or (roi[2:] > bounds[2:]).any()
+            # Keep the confusing object in place; never relocate it to easy background.
+            if outside or self._intersects(roi, occupied):
+                continue
+            rois.append(roi)
+            counts.append(len(group))
+        rois = np.asarray(rois, dtype=np.float32).reshape(-1, 4)
+        area = (rois[:, 2:] - rois[:, :2]).prod(axis=1)
+        order = np.lexsort((area, np.asarray(counts) == 1))
+        return rois[order[:min(self.hard_negative_slots, self.max_rois)]]
+
+    def _propose(self, boxes, occupied, bounds, rng, hard_boxes):
         if rng.rand() < self.no_roi_prob:
             return np.empty((0, 4), dtype=np.float32)
         rois = []
@@ -202,7 +224,13 @@ class QuadROICrop(BaseTransform):
         counts = np.asarray(counts)
         area = (rois[:, 2:] - rois[:, :2]).prod(axis=1)
         order = np.lexsort((area, counts == 1))
-        return rois[order[:self.max_rois]]
+        rois = rois[order]
+        if self.hard_negative_slots:
+            hard = self._hard_rois(hard_boxes, occupied, bounds, rng)
+            duplicate = (rois[:, None] == hard[None]).all(axis=2).any(axis=1)
+            rois = rois[~duplicate][:self.max_rois - len(hard)]
+            return np.concatenate((hard, rois))
+        return rois[:self.max_rois]
 
     @staticmethod
     def _pack_roi(image, box):
@@ -235,7 +263,13 @@ class QuadROICrop(BaseTransform):
         ori_shape = image.shape[:2]
         boxes = results.get('gt_bboxes', np.empty((0, 4), dtype=np.float32))
         flags = results.get('gt_ignore_flags', np.zeros(len(boxes), dtype=bool))
-        image, boxes, scale, offset = self._vga(image, boxes, rng)
+        hard_boxes = np.asarray(results.get('hard_negative_boxes', []), dtype=np.float32).reshape(-1, 4)
+        count = len(boxes)
+        image, all_boxes, scale, offset = self._vga(image, np.concatenate((boxes, hard_boxes)), rng)
+        boxes, hard_boxes = all_boxes[:count], all_boxes[count:]
+        hard_sizes = hard_boxes[:, 2:] - hard_boxes[:, :2]
+        hard_boxes = hard_boxes[(hard_sizes >= 2).all(axis=1) &
+                                (hard_sizes.prod(axis=1) >= self.min_gt_area)]
         sizes = boxes[:, 2:] - boxes[:, :2]
         good = (sizes >= 2).all(axis=1) & (sizes.prod(axis=1) >= self.min_gt_area)
         boxes, flags = boxes[good], flags[good]
@@ -248,7 +282,7 @@ class QuadROICrop(BaseTransform):
         elif self.pseudo_rois:
             bounds = (np.array([0, 0, 640, 480]) if self.training else
                       np.r_[offset, offset + np.rint(scale * ori_shape[::-1])])
-            rois = self._propose(boxes[~flags.astype(bool)], boxes, bounds, rng)
+            rois = self._propose(boxes[~flags.astype(bool)], boxes, bounds, rng, hard_boxes)
         else:
             rois = np.empty((0, 4), dtype=np.float32)
         patches = np.zeros((self.max_rois, 16, 16, 16), dtype=np.float32)
