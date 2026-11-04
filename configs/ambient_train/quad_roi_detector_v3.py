@@ -20,6 +20,7 @@ model = dict(
 
 roi_settings = dict(
     max_rois=8, min_gt_area=min_gt_area, height_thresholds=height_thresholds,
+    matched_negatives=True, negative_attempts=32,
     merge_cfg=dict(
         max_members=3, size_ratio=1.5, gap_ratio=0.5, area_ratio=1.5,
         min_height=24, min_center_distance=2.0))
@@ -32,7 +33,7 @@ train_dataloader = dict(dataset=dict(pipeline=train_pipeline))
 val_pipeline = [dict(step) for step in _base_.val_pipeline]
 val_pipeline[-1].update(roi_settings)
 val_pipeline[-1].update(
-    keep_probs=(1.0, 1.0, 0.0), random_rois=(0, 2),
+    keep_probs=(1.0, 0.8, 0.3), random_rois=(0, 2),
     no_roi_prob=0.0, label_free_prob=0.0, partial_prob=0.0)
 val_dataloader = dict(dataset=dict(pipeline=val_pipeline))
 test_dataloader = dict(dataset=dict(pipeline=val_pipeline))

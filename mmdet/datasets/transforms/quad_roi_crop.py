@@ -15,7 +15,8 @@ class QuadROICrop(BaseTransform):
                  roi_scale=(0.9, 1.4), shift=0.15, random_rois=(0, 3),
                  no_roi_prob=0.15, label_free_prob=0.2, pseudo_rois=True,
                  seed=2026, height_thresholds=None, merge_cfg=None,
-                 min_gt_area=0, partial_prob=0.0, partial_fraction=(0.3, 0.6)):
+                 min_gt_area=0, partial_prob=0.0, partial_fraction=(0.3, 0.6),
+                 matched_negatives=False, negative_attempts=32):
         self.training = training
         self.max_rois = max_rois
         self.crop_scale = crop_scale
@@ -33,6 +34,8 @@ class QuadROICrop(BaseTransform):
         self.min_gt_area = min_gt_area
         self.partial_prob = partial_prob
         self.partial_fraction = partial_fraction
+        self.matched_negatives = matched_negatives
+        self.negative_attempts = negative_attempts
 
     def _vga(self, image, boxes, rng):
         height, width = image.shape[:2]
@@ -86,6 +89,25 @@ class QuadROICrop(BaseTransform):
     def _enclose(boxes):
         return np.r_[boxes[:, :2].min(axis=0), boxes[:, 2:].max(axis=0)]
 
+    @staticmethod
+    def _intersects(roi, boxes):
+        overlap = np.minimum(roi[2:], boxes[:, 2:]) - np.maximum(roi[:2], boxes[:, :2])
+        return (overlap > 0).all(axis=1).any()
+
+    def _background_roi(self, size, occupied, bounds, rng):
+        size = np.ceil(size / 4).astype(int) * 4
+        lo = np.ceil(bounds[:2] / 4).astype(int) * 4
+        hi = np.floor(bounds[2:] / 4).astype(int) * 4
+        steps = (hi - lo - size) // 4
+        if (steps < 0).any():
+            return None
+        for _ in range(self.negative_attempts):
+            origin = lo + 4 * np.array([rng.randint(n + 1) for n in steps])
+            roi = np.r_[origin, origin + size].astype(np.float32)
+            if not self._intersects(roi, occupied):
+                return roi
+        return None
+
     def _merge(self, rois):
         cfg = self.merge_cfg
         areas = (rois[:, 2:] - rois[:, :2]).prod(axis=1)
@@ -125,10 +147,10 @@ class QuadROICrop(BaseTransform):
                     break
                 indices.append(best)
                 remaining.remove(best)
-            groups.append(rois[indices])
+            groups.append(indices)
         return groups
 
-    def _propose(self, boxes, rng):
+    def _propose(self, boxes, occupied, bounds, rng):
         if rng.rand() < self.no_roi_prob:
             return np.empty((0, 4), dtype=np.float32)
         rois = []
@@ -142,17 +164,42 @@ class QuadROICrop(BaseTransform):
                 if rng.rand() >= self.keep_probs[group]:
                     continue
                 rois.append(self._jitter(box, rng) if self.merge_cfg is None else box)
+        negative = [False] * len(rois)
+        templates = np.asarray(rois if rois else boxes, dtype=np.float32).reshape(-1, 4)
         for _ in range(rng.randint(self.random_rois[0], self.random_rois[1] + 1)):
-            size = np.array([rng.uniform(20, 180), rng.uniform(32, 280)])
-            center = rng.uniform(size / 2, [640, 480] - size / 2)
-            rois.append(self._align(np.r_[center - size / 2, center + size / 2]))
-        rois = np.unique(np.asarray(rois, dtype=np.float32).reshape(-1, 4), axis=0)
-        counts = np.ones(len(rois), dtype=int)
-        if self.merge_cfg is not None:
-            groups = self._merge(rois)
-            counts = np.array([len(group) for group in groups])
-            rois = np.asarray([self._jitter(self._enclose(group), rng) for group in groups],
-                              dtype=np.float32).reshape(-1, 4)
+            if self.matched_negatives and len(templates):
+                template = templates[rng.randint(len(templates))]
+                size = template[2:] - template[:2]
+            else:
+                size = np.array([rng.uniform(20, 180), rng.uniform(32, 280)])
+            if self.matched_negatives:
+                roi = self._background_roi(size, occupied, bounds, rng)
+                if roi is None:
+                    continue
+            else:
+                center = rng.uniform(size / 2, [640, 480] - size / 2)
+                roi = self._align(np.r_[center - size / 2, center + size / 2])
+            rois.append(roi)
+            negative.append(self.matched_negatives)
+        rois, indices = np.unique(
+            np.asarray(rois, dtype=np.float32).reshape(-1, 4), axis=0, return_index=True)
+        negative = np.asarray(negative, dtype=bool)[indices]
+        groups = self._merge(rois) if self.merge_cfg is not None else [[i] for i in range(len(rois))]
+        proposals, counts = [], []
+        for group in groups:
+            roi = (self._jitter(self._enclose(rois[group]), rng)
+                   if self.merge_cfg is not None else rois[group[0]])
+            if negative[group].all():
+                # Merging/jitter can move a background window onto a person or padding.
+                outside = (roi[:2] < bounds[:2]).any() or (roi[2:] > bounds[2:]).any()
+                if outside or self._intersects(roi, occupied):
+                    roi = self._background_roi(roi[2:] - roi[:2], occupied, bounds, rng)
+                    if roi is None:
+                        continue
+            proposals.append(roi)
+            counts.append(len(group))
+        rois = np.asarray(proposals, dtype=np.float32).reshape(-1, 4)
+        counts = np.asarray(counts)
         area = (rois[:, 2:] - rois[:, :2]).prod(axis=1)
         order = np.lexsort((area, counts == 1))
         return rois[order[:self.max_rois]]
@@ -199,7 +246,9 @@ class QuadROICrop(BaseTransform):
             order = np.argsort((rois[:, 2:] - rois[:, :2]).prod(1), kind='stable')
             rois = rois[order[:self.max_rois]]
         elif self.pseudo_rois:
-            rois = self._propose(boxes[~flags.astype(bool)], rng)
+            bounds = (np.array([0, 0, 640, 480]) if self.training else
+                      np.r_[offset, offset + np.rint(scale * ori_shape[::-1])])
+            rois = self._propose(boxes[~flags.astype(bool)], boxes, bounds, rng)
         else:
             rois = np.empty((0, 4), dtype=np.float32)
         patches = np.zeros((self.max_rois, 16, 16, 16), dtype=np.float32)
