@@ -1,0 +1,20 @@
+{
+  "checkpoint": "C:\\OculiProjects\\mmdetection\\work_dirs\\quad_roi_detector_v3\\best_coco_bbox_mAP_50_epoch_8.pth",
+  "config": "C:\\OculiProjects\\mmdetection\\configs\\ambient_train\\quad_roi_detector_v3.py",
+  "nms_iou": 0.5,
+  "max_per_img": 64,
+  "ambient_topk": 64,
+  "roi_topk": 16,
+  "support_iou": 0.5,
+  "support_iof": 0.8,
+  "min_visibility": 0.25,
+  "merge_cfg": {
+    "max_members": 3,
+    "size_ratio": 1.5,
+    "gap_ratio": 0.5,
+    "area_ratio": 1.5,
+    "min_height": 24,
+    "min_center_distance": 2.0
+  },
+  "merge_scale_max": 1.4
+}
