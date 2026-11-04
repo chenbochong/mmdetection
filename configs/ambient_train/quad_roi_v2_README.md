@@ -42,16 +42,16 @@ with the same validation VGA mapping and cutoff, preserving original COCO
 coordinates, annotation areas, and images without remaining people. The source
 annotation JSON is unchanged. Training, validation and test share this setting.
 
-The shared `height_thresholds=(40, 80)` uses person-box height after the VGA
-transform: small < 40px, medium 40px to < 80px, large >= 80px. These approximate
->10m, 5-10m and <5m for a standing 1.7m person, a 640x480 image and a 120-degree
-diagonal rectilinear field of view. The projected heights at 10m and 5m are about
-39px and 79px. COCO has no distance labels; this is a configurable size proxy,
+The shared `height_thresholds=(40, 131)` uses person-box height after the VGA
+transform: small < 40px, medium 40px to < 131px, large >= 131px. These approximate
+>10m, 3-10m and <3m for a standing 1.7m person, a 640x480 image and a 120-degree
+diagonal rectilinear field of view. The projected heights at 10m and 3m are about
+39px and 131px. COCO has no distance labels; this is a configurable size proxy,
 not a depth measurement.
 
 Validation/test `bbox_mAP_s`, `bbox_mAP_m`, `bbox_mAP_l` and the printed size-group
 AR now use these VGA height groups, replacing COCO's original area bins. Exactly
-40px belongs to medium and exactly 80px belongs to large. The evaluator applies
+40px belongs to medium and exactly 131px belongs to large. The evaluator applies
 the same height ranges to GT and unmatched detections. Original boxes still
 determine IoU, and overall AP/AP50 retain their existing definition after the
 minimum-GT-area filter. The grouped AP/AR still average IoU 0.50:0.95; they are

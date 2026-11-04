@@ -20,10 +20,10 @@ from .trident_resnet import TridentResNet
 
 from .ambient_lite_backbone import AmbientLiteBackbone
 
-from .quad_roi_backbone import QuadROIBackbone
+from .quad_roi_backbone import QuadROIBackbone, QuadROIBackboneV3
 
 __all__ = [
-    'QuadROIBackbone',
+    'QuadROIBackbone', 'QuadROIBackboneV3',
     'RegNet', 'ResNet', 'ResNetV1d', 'ResNeXt', 'SSDVGG', 'HRNet',
     'MobileNetV2', 'Res2Net', 'HourglassNet', 'DetectoRS_ResNet',
     'DetectoRS_ResNeXt', 'Darknet', 'ResNeSt', 'TridentResNet', 'CSPDarknet',

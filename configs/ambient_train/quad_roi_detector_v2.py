@@ -13,7 +13,7 @@ param_scheduler = [
          by_epoch=True, begin=0, end=max_epochs)]
 
 min_gt_area = 64
-height_thresholds = (40, 80)  # Approx. 10m / 5m, 120-degree diagonal FOV, 1.7m person.
+height_thresholds = (40, 131)  # Approx. 10m / 3m, 120-degree diagonal FOV, 1.7m person.
 roi_settings = dict(
     max_rois=8, min_gt_area=min_gt_area,
     height_thresholds=height_thresholds,

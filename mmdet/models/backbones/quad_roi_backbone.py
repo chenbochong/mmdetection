@@ -46,3 +46,36 @@ class QuadROIBackbone(BaseModule):
 
     def forward(self, x):
         return self.ambient(x)
+
+
+@MODELS.register_module()
+class QuadROIBackboneV3(BaseModule):
+    def __init__(self, ambient_channels=64, roi_channels=64, init_cfg=None):
+        super().__init__(init_cfg)
+        c = ambient_channels
+        self.ambient_stem = nn.Sequential(conv(1, 16, stride=2), separable(16, c))
+        self.ambient_stage3 = nn.Sequential(
+            separable(c, c, stride=2), separable(c, c), separable(c, c))
+        self.ambient_stage4 = nn.Sequential(
+            separable(c, c, stride=2), *[separable(c, c) for _ in range(3)])
+        self.ambient_refine3 = separable(c, c)
+        self.ambient_refine2 = separable(c, c)
+        self.roi_encoder = nn.Sequential(
+            conv(16, roi_channels, stride=2), conv(roi_channels, roi_channels),
+            conv(roi_channels, roi_channels),
+            separable(roi_channels, roi_channels),
+            separable(roi_channels, roi_channels))
+
+    def ambient(self, x):
+        a2 = self.ambient_stem(F.pad(x, (0, 0, 0, 4)))
+        a3 = self.ambient_stage3(a2)
+        a4 = self.ambient_stage4(a3)
+        p3 = self.ambient_refine3(a3 + F.interpolate(a4, scale_factor=2, mode='nearest'))
+        p2 = self.ambient_refine2(a2 + F.interpolate(p3, scale_factor=2, mode='nearest'))
+        return p2, p3
+
+    def roi(self, x):
+        return self.roi_encoder(x)
+
+    def forward(self, x):
+        return self.ambient(x)

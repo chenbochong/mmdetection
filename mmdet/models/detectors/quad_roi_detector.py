@@ -13,13 +13,13 @@ class QuadROIDetector(BaseDetector):
     def __init__(self, backbone, neck, head, ambient_head, data_preprocessor,
                  min_visibility=0.6, score_thr=0.05, nms_iou=0.5,
                  support_iou=0.5, max_per_img=64, ambient_topk=64,
-                 roi_topk=16, init_cfg=None):
+                 roi_topk=16, init_cfg=None, fused_head=None):
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
         self.backbone = MODELS.build(backbone)
         self.neck = MODELS.build(neck)
         self.ambient_head = MODELS.build(ambient_head)
         self.hd_head = MODELS.build(head)
-        self.fused_head = MODELS.build(head)
+        self.fused_head = MODELS.build(fused_head or head)
         self.min_visibility = min_visibility
         self.score_thr = score_thr
         self.nms_iou = nms_iou
@@ -47,11 +47,14 @@ class QuadROIDetector(BaseDetector):
                                 padding_mode='border')
         return context * valid, valid.to(ambient.dtype)
 
-    def _forward(self, inputs, data_samples=None):
+    def _ambient_forward(self, inputs):
         ambient = self.extract_feat(inputs)
-        ambient_pred = self.ambient_head(ambient)
+        return ambient, dict(ambient=self.ambient_head(ambient))
+
+    def _forward(self, inputs, data_samples=None):
+        ambient, output = self._ambient_forward(inputs)
         batch, slots = inputs['roi_valid'].nonzero(as_tuple=True)
-        output = dict(ambient=ambient_pred, batch=batch, slots=slots)
+        output.update(batch=batch, slots=slots)
         if len(batch) == 0:
             return output
         boxes = inputs['roi_boxes'][batch, slots]
@@ -76,21 +79,29 @@ class QuadROIDetector(BaseDetector):
         factor, offset = affine[:2].repeat(2), affine[2:].repeat(2)
         return gt[selected] * factor + offset, ignored * factor + offset
 
-    def loss(self, batch_inputs, batch_data_samples):
-        out = self._forward(batch_inputs)
+    def _ambient_losses(self, out, batch_data_samples):
         pred = out['ambient']
         unit = pred.new_tensor([640, 480, 640, 480])
         boxes = [s.gt_instances.bboxes / unit for s in batch_data_samples]
         ignored = [s.ignored_instances.bboxes / unit for s in batch_data_samples]
-        losses = {'ambient_' + k: v for k, v in self.ambient_head.loss(
+        return {'ambient_' + k: v for k, v in self.ambient_head.loss(
             pred, boxes, ignored, torch.ones_like(pred[:, :1])).items()}
+
+    def _roi_losses(self, out, batch_data_samples):
+        targets = [self._roi_targets(batch_data_samples[int(b)], roi, affine)
+                   for b, roi, affine in zip(out['batch'], out['boxes'], out['affine'])]
+        boxes, ignored = zip(*targets)
+        losses = {}
+        for name, head in [('hd', self.hd_head), ('fused', self.fused_head)]:
+            losses.update({name + '_' + k: v for k, v in head.loss(
+                out[name], boxes, ignored, out['valid']).items()})
+        return losses
+
+    def loss(self, batch_inputs, batch_data_samples):
+        out = self._forward(batch_inputs)
+        losses = self._ambient_losses(out, batch_data_samples)
         if len(out['batch']):
-            targets = [self._roi_targets(batch_data_samples[int(b)], roi, affine)
-                       for b, roi, affine in zip(out['batch'], out['boxes'], out['affine'])]
-            boxes, ignored = zip(*targets)
-            for name, head in [('hd', self.hd_head), ('fused', self.fused_head)]:
-                losses.update({name + '_' + k: v for k, v in head.loss(
-                    out[name], boxes, ignored, out['valid']).items()})
+            losses.update(self._roi_losses(out, batch_data_samples))
         else:
             # Keep the same distributed graph when a batch contains no ROIs.
             zero = sum(p.sum() * 0 for module in
@@ -111,6 +122,9 @@ class QuadROIDetector(BaseDetector):
         scores = candidates.scores[None].expand_as(overlap)
         scores = scores * (overlap >= self.support_iou)
         return scores.max(dim=1)
+
+    def _hd_matched_score(self, boxes, evidence, rois, slots):
+        return self._matched_score(boxes, evidence)
 
     def _finish(self, ambient, fused, hd, rois, slots, sample, rescale):
         candidates = InstanceData.cat([ambient] + fused)
@@ -140,9 +154,12 @@ class QuadROIDetector(BaseDetector):
             result.hd_available = result.hd_coverage > 0
             result.roi_id = torch.where(result.hd_available, slots[roi_index], -1)
             evidence = InstanceData.cat(hd)
-            support, match = self._matched_score(result.bboxes, evidence)
+            support, match = self._hd_matched_score(result.bboxes, evidence, rois, slots)
             result.hd_support = support
             result.roi_id = torch.where(support > 0, evidence.roi_id[match], result.roi_id)
+            supported_roi = torch.searchsorted(slots, evidence.roi_id[match])
+            matched_coverage = coverage.gather(1, supported_roi[:, None]).squeeze(1)
+            result.hd_coverage = torch.where(support > 0, matched_coverage, result.hd_coverage)
         if rescale:
             scale = result.bboxes.new_tensor(sample.vga_scale).repeat(2)
             offset = result.bboxes.new_tensor(sample.vga_offset).repeat(2)
@@ -151,10 +168,13 @@ class QuadROIDetector(BaseDetector):
             result.bboxes[:, 1::2].clamp_(0, sample.ori_shape[0])
         return result
 
+    def _decode_ambient(self, out):
+        return self.ambient_head.decode(
+            out['ambient'], torch.ones_like(out['ambient'][:, :1]), topk=self.ambient_topk)
+
     def predict(self, batch_inputs, batch_data_samples, rescale=True):
         out = self._forward(batch_inputs)
-        ambient = self.ambient_head.decode(
-            out['ambient'], torch.ones_like(out['ambient'][:, :1]), topk=self.ambient_topk)
+        ambient = self._decode_ambient(out)
         fused = [[] for _ in ambient]
         hd = [[] for _ in ambient]
         if len(out['batch']):

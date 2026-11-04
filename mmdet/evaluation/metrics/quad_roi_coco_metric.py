@@ -42,9 +42,11 @@ class _HeightCOCOevalMP(_HeightCOCOeval, COCOevalMP):
 class QuadROICocoMetric(CocoMetric):
     """BBox metrics for the Quad ROI detector."""
 
-    def __init__(self, ann_file, min_gt_area=64, height_thresholds=(40, 80), **kwargs):
+    def __init__(self, ann_file, min_gt_area=64, height_thresholds=(40, 130),
+                 report_ap50_by_size=False, **kwargs):
         super().__init__(ann_file=ann_file, **kwargs)
         self.height_thresholds = height_thresholds
+        self.report_ap50_by_size = report_ap50_by_size
         self.vga_transforms = {}
         coco = self._coco_api
         annotations = []
@@ -110,5 +112,15 @@ class QuadROICocoMetric(CocoMetric):
         items = self.metric_items if self.metric_items is not None else names[:6]
         logger.info('bbox_mAP_copypaste: ' + ' '.join(
             f'{value:.3f}' for value in evaluator.stats[:6]))
-        return {f'bbox_{name}': float(round(evaluator.stats[names.index(name)], 3))
-                for name in items}
+        metrics = {f'bbox_{name}': float(round(evaluator.stats[names.index(name)], 3))
+                   for name in items}
+        if self.report_ap50_by_size:
+            iou50 = np.isclose(evaluator.params.iouThrs, 0.5)
+            for area, suffix in enumerate(('', '_s', '_m', '_l')):
+                precision = evaluator.eval['precision'][iou50, :, :, area, -1]
+                recall = evaluator.eval['recall'][iou50, :, area, -1]
+                for name, values in [('mAP_50', precision), ('AR_50', recall)]:
+                    values = values[values >= 0]
+                    value = float(values.mean()) if values.size else -1.0
+                    metrics[f'bbox_{name}{suffix}'] = round(value, 3)
+        return metrics

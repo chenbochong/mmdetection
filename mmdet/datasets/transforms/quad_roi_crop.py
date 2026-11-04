@@ -15,7 +15,7 @@ class QuadROICrop(BaseTransform):
                  roi_scale=(0.9, 1.4), shift=0.15, random_rois=(0, 3),
                  no_roi_prob=0.15, label_free_prob=0.2, pseudo_rois=True,
                  seed=2026, height_thresholds=None, merge_cfg=None,
-                 min_gt_area=0):
+                 min_gt_area=0, partial_prob=0.0, partial_fraction=(0.3, 0.6)):
         self.training = training
         self.max_rois = max_rois
         self.crop_scale = crop_scale
@@ -31,6 +31,8 @@ class QuadROICrop(BaseTransform):
         self.height_thresholds = height_thresholds
         self.merge_cfg = merge_cfg
         self.min_gt_area = min_gt_area
+        self.partial_prob = partial_prob
+        self.partial_fraction = partial_fraction
 
     def _vga(self, image, boxes, rng):
         height, width = image.shape[:2]
@@ -70,7 +72,15 @@ class QuadROICrop(BaseTransform):
         center = (box[:2] + box[2:]) / 2
         center += rng.uniform(-self.shift, self.shift, 2) * size
         size = size * rng.uniform(*self.roi_scale, size=2)
-        return self._align(np.r_[center - size / 2, center + size / 2])
+        roi = np.r_[center - size / 2, center + size / 2]
+        if self.partial_prob and rng.rand() < self.partial_prob:
+            axis = rng.randint(2)
+            length = size[axis] * rng.uniform(*self.partial_fraction)
+            if rng.rand() < 0.5:
+                roi[axis + 2] = roi[axis] + length
+            else:
+                roi[axis] = roi[axis + 2] - length
+        return self._align(roi)
 
     @staticmethod
     def _enclose(boxes):
