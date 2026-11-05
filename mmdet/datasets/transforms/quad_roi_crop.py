@@ -17,7 +17,7 @@ class QuadROICrop(BaseTransform):
                  seed=2026, height_thresholds=None, merge_cfg=None,
                  min_gt_area=0, partial_prob=0.0, partial_fraction=(0.3, 0.6),
                  matched_negatives=False, negative_attempts=32,
-                 hard_negative_slots=0):
+                 hard_negative_slots=0, roi_size=64):
         self.training = training
         self.max_rois = max_rois
         self.crop_scale = crop_scale
@@ -38,6 +38,7 @@ class QuadROICrop(BaseTransform):
         self.matched_negatives = matched_negatives
         self.negative_attempts = negative_attempts
         self.hard_negative_slots = hard_negative_slots
+        self.packed_size = roi_size // 4
 
     def _vga(self, image, boxes, rng):
         height, width = image.shape[:2]
@@ -232,8 +233,7 @@ class QuadROICrop(BaseTransform):
             return np.concatenate((hard, rois))
         return rois[:self.max_rois]
 
-    @staticmethod
-    def _pack_roi(image, box):
+    def _pack_roi(self, image, box):
         x1, y1, x2, y2 = box.astype(int)
         block = image[y1:y2, x1:x2]
         # BGR input, RGGB Quad Bayer; channels follow row-major CFA phase.
@@ -242,18 +242,19 @@ class QuadROICrop(BaseTransform):
                   for y in range(4) for x in range(4)]
         packed = np.stack(phases, axis=-1).astype(np.float32)
         ph, pw = packed.shape[:2]
-        ratio = 16 / max(ph, pw)
+        side = self.packed_size
+        ratio = side / max(ph, pw)
         nw, nh = max(1, round(pw * ratio)), max(1, round(ph * ratio))
         interpolation = cv2.INTER_AREA if ratio < 1 else cv2.INTER_LINEAR
         resized = np.stack([
             cv2.resize(packed[..., c], (nw, nh), interpolation=interpolation)
             for c in range(16)], axis=-1)
-        px, py = (16 - nw) // 2, (16 - nh) // 2
-        canvas = np.zeros((16, 16, 16), dtype=np.float32)
+        px, py = (side - nw) // 2, (side - nh) // 2
+        canvas = np.zeros((side, side, 16), dtype=np.float32)
         canvas[py:py + nh, px:px + nw] = resized
         # VGA xy -> normalized, letterboxed ROI xy.
-        scale = np.array([nw / (16 * (x2 - x1)), nh / (16 * (y2 - y1))])
-        offset = np.array([px / 16, py / 16]) - box[:2] * scale
+        scale = np.array([nw / (side * (x2 - x1)), nh / (side * (y2 - y1))])
+        offset = np.array([px / side, py / side]) - box[:2] * scale
         return canvas.transpose(2, 0, 1), np.r_[scale, offset].astype(np.float32)
 
     def transform(self, results):
@@ -285,7 +286,7 @@ class QuadROICrop(BaseTransform):
             rois = self._propose(boxes[~flags.astype(bool)], boxes, bounds, rng, hard_boxes)
         else:
             rois = np.empty((0, 4), dtype=np.float32)
-        patches = np.zeros((self.max_rois, 16, 16, 16), dtype=np.float32)
+        patches = np.zeros((self.max_rois, 16, self.packed_size, self.packed_size), dtype=np.float32)
         roi_boxes = np.zeros((self.max_rois, 4), dtype=np.float32)
         affine = np.zeros((self.max_rois, 4), dtype=np.float32)
         valid = np.zeros(self.max_rois, dtype=bool)

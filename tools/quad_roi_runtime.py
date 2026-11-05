@@ -31,7 +31,7 @@ def nms(boxes, scores, threshold, limit):
     return np.asarray(keep, dtype=np.int64)
 
 
-def pack_roi(rgb, box):
+def pack_roi(rgb, box, side=16):
     x1, y1, x2, y2 = box.astype(int)
     block = rgb[y1:y2, x1:x2]
     # RGB input; the 16 channels retain the row-major Quad Bayer phases.
@@ -40,22 +40,22 @@ def pack_roi(rgb, box):
               for y in range(4) for x in range(4)]
     packed = np.stack(phases, axis=-1).astype(np.float32)
     ph, pw = packed.shape[:2]
-    ratio = 16 / max(ph, pw)
+    ratio = side / max(ph, pw)
     nw, nh = max(1, round(pw * ratio)), max(1, round(ph * ratio))
     interpolation = cv2.INTER_AREA if ratio < 1 else cv2.INTER_LINEAR
     resized = np.stack([cv2.resize(packed[..., c], (nw, nh), interpolation=interpolation)
                         for c in range(16)], axis=-1)
-    px, py = (16 - nw) // 2, (16 - nh) // 2
-    canvas = np.zeros((16, 16, 16), dtype=np.float32)
+    px, py = (side - nw) // 2, (side - nh) // 2
+    canvas = np.zeros((side, side, 16), dtype=np.float32)
     canvas[py:py + nh, px:px + nw] = resized
-    scale = np.array([nw / (16 * (x2 - x1)), nh / (16 * (y2 - y1))])
-    offset = np.array([px / 16, py / 16]) - box[:2] * scale
+    scale = np.array([nw / (side * (x2 - x1)), nh / (side * (y2 - y1))])
+    offset = np.array([px / side, py / side]) - box[:2] * scale
     affine = np.r_[scale, offset].astype(np.float32)
     return np.ascontiguousarray(canvas.transpose(2, 0, 1)[None] / 255), affine
 
 
-def align_context(feature, box, affine):
-    t = (np.arange(8, dtype=np.float32) + 0.25) / 8
+def align_context(feature, box, affine, size=8):
+    t = (np.arange(size, dtype=np.float32) + 0.25) / size
     x, y = np.meshgrid(t, t)
     world = (np.stack((x, y), axis=-1) - affine[2:]) / affine[:2]
     valid = ((world >= box[:2]) & (world < box[2:])).all(axis=-1).astype(np.float32)
@@ -93,7 +93,8 @@ def decode(prediction, valid, topk, ltrb=False):
     else:
         boxes = np.concatenate((point - size / 2, point + size / 2), axis=0)
     boxes = boxes.T / np.array([w, h, w, h], dtype=np.float32)
-    return boxes, scores[indices]
+    components = np.stack((sigmoid(selected[0]), sigmoid(selected[quality_index])), axis=1)
+    return boxes, scores[indices], components
 
 
 class QuadROIOnnx:
@@ -119,14 +120,18 @@ class QuadROIOnnx:
         rois = np.asarray(rois, dtype=np.float32).reshape(-1, 4)
         ambient = np.ascontiguousarray(rgb_vga[::8, 2::8, 1][None, None], dtype=np.float32) / 255
         context, fine, coarse = self.ambient.run(['context', 'fine', 'coarse'], {'ambient': ambient})
-        ambient_boxes, ambient_scores = [], []
+        ambient_boxes, ambient_scores, ambient_components = [], [], []
         for pred, rows in [(fine, 30), (coarse, 15)]:
             valid = np.zeros(pred.shape[-2:], dtype=np.float32)
             valid[:rows] = 1
-            boxes, scores = decode(pred, valid, settings['ambient_topk'])
+            boxes, scores, components = decode(pred, valid, settings['ambient_topk'])
+            ambient_components.append(components)
             ambient_boxes.append(boxes * np.array([640, 512, 640, 512], dtype=np.float32))
             ambient_scores.append(scores)
         ambient_boxes, ambient_scores = np.concatenate(ambient_boxes), np.concatenate(ambient_scores)
+        ambient_components = np.concatenate(ambient_components)
+        candidate_components = [ambient_components]
+        hd_components = []
         candidates, confidences = [ambient_boxes], [ambient_scores]
         sources = [np.zeros(len(ambient_scores), dtype=np.int64)]
         hd_boxes, hd_scores, hd_slots = [], [], []
@@ -139,24 +144,34 @@ class QuadROIOnnx:
             fused_pred = self.fusion.run(['prediction'], dict(
                 hd=hd, context=aligned, valid=valid, scale=scale))[0]
             for pred, ltrb in [(fused_pred, True), (hd_pred, False)]:
-                boxes, scores = decode(pred, valid[0, 0], settings['roi_topk'], ltrb)
+                boxes, scores, components = decode(pred, valid[0, 0], settings['roi_topk'], ltrb)
                 boxes = (boxes - np.tile(affine[2:], 2)) / np.tile(affine[:2], 2)
                 if ltrb:
+                    candidate_components.append(components)
                     candidates.append(boxes)
                     confidences.append(scores)
                     sources.append(np.ones(len(scores), dtype=np.int64))
                 else:
+                    hd_components.append(components)
                     hd_boxes.append(boxes)
                     hd_scores.append(scores)
                     hd_slots.append(np.full(len(scores), slot, dtype=np.int64))
         boxes, scores, sources = np.concatenate(candidates), np.concatenate(confidences), np.concatenate(sources)
+        components = np.concatenate(candidate_components)
         boxes = np.clip(boxes, 0, np.array([640, 480, 640, 480], dtype=np.float32))
         keep = (scores >= confidence_threshold) & (boxes[:, 2:] > boxes[:, :2]).all(axis=1)
         boxes, scores, sources = boxes[keep], scores[keep], sources[keep]
+        components = components[keep]
         keep = nms(boxes, scores, settings['nms_iou'], settings['max_per_img'])
         boxes, scores, sources = boxes[keep], scores[keep], sources[keep]
+        components = components[keep]
         count = len(boxes)
         result = dict(bboxes=boxes, scores=scores, source=sources,
+                      center_score=components[:, 0], quality_score=components[:, 1],
+                      ambient_center=np.zeros(count, dtype=np.float32),
+                      ambient_quality=np.zeros(count, dtype=np.float32),
+                      hd_center=np.zeros(count, dtype=np.float32),
+                      hd_quality=np.zeros(count, dtype=np.float32),
                       ambient_score=np.zeros(count, dtype=np.float32),
                       hd_support=np.zeros(count, dtype=np.float32),
                       hd_coverage=np.zeros(count, dtype=np.float32),
@@ -166,6 +181,10 @@ class QuadROIOnnx:
             return result
         overlap = box_iou(boxes, ambient_boxes)
         result['ambient_score'] = (ambient_scores[None] * (overlap >= settings['support_iou'])).max(axis=1)
+        ambient_match = (ambient_scores[None] * (overlap >= settings['support_iou'])).argmax(axis=1)
+        has_ambient = result['ambient_score'] > 0
+        result['ambient_center'][has_ambient] = ambient_components[ambient_match[has_ambient], 0]
+        result['ambient_quality'][has_ambient] = ambient_components[ambient_match[has_ambient], 1]
         if len(rois):
             coverage = intersection_area(boxes, rois) / np.maximum(box_area(boxes)[:, None], 1)
             best_roi = coverage.argmax(axis=1)
@@ -187,6 +206,9 @@ class QuadROIOnnx:
             match = support.argmax(axis=1)
             result['hd_support'] = support[np.arange(count), match]
             supported = result['hd_support'] > 0
+            evidence_components = np.concatenate(hd_components)
+            result['hd_center'][supported] = evidence_components[match[supported], 0]
+            result['hd_quality'][supported] = evidence_components[match[supported], 1]
             result['roi_id'][supported] = slots[match[supported]]
             result['hd_coverage'][supported] = coverage[np.arange(count)[supported], slots[match[supported]]]
         return result

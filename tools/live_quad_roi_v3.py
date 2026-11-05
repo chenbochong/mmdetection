@@ -31,6 +31,8 @@ class Track:
     last_roi: int = -1000
     far: bool = True
     stable_frames: int = 0
+    score_lines: tuple = ()
+    observed_frame: int = 0
 
 
 def appearance(ambient, box):
@@ -142,6 +144,16 @@ class AlphaBetaTracker:
         retained = []
         for track in self.tracks:
             di = observations.get(track.id)
+            if di is not None:
+                source = 'A' if detections['source'][di] == 0 else 'F'
+                track.score_lines = (
+                    f"D/{source} C {detections['center_score'][di]:.2f} Q {detections['quality_score'][di]:.2f} S {scores[di]:.2f}",
+                    (f"A C {detections['ambient_center'][di]:.2f} Q {detections['ambient_quality'][di]:.2f} S {detections['ambient_score'][di]:.2f}"
+                     if detections['ambient_score'][di] > 0 else 'A: no matched evidence'),
+                    (f"H C {detections['hd_center'][di]:.2f} Q {detections['hd_quality'][di]:.2f} S {detections['hd_support'][di]:.2f}"
+                     if detections['hd_support'][di] > 0 else
+                     'H: no ROI' if not len(rois) else 'H: no matched evidence'))
+                track.observed_frame = self.frame
             box = boxes[di] if di is not None else state_box(track.state)
             checked = self.covered(box, rois)
             if checked:
@@ -320,8 +332,16 @@ def main():
                 status = (f'coast {track.misses}/{args.max_misses}' if track.misses else
                           'confirmed' if track.confirmed else 'pending')
                 cv2.rectangle(frame, tuple(box[:2]), tuple(box[2:]), color, 2)
-                cv2.putText(frame, f'#{track.id} {status} {track.score:.2f}',
-                            (box[0], max(15, box[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+                age = tracker.frame - track.observed_frame
+                stamp = 'now' if age == 0 else f'{age}f ago'
+                lines = (f'#{track.id} {status} [{stamp}]',) + track.score_lines
+                x = min(box[0], 360)
+                y = max(40, min(box[1], 480 - 18 * len(lines)))
+                for line in lines:
+                    width = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
+                    cv2.rectangle(frame, (x, y - 13), (x + width + 4, y + 3), (0, 0, 0), -1)
+                    cv2.putText(frame, line, (x + 2, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1)
+                    y += 18
             fps = 1 / (time.perf_counter() - start)
             cv2.putText(frame, f'{fps:.1f} FPS  ROIs {len(used_rois)}/8  memory {len(tracker.memory.regions)}',
                         (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
