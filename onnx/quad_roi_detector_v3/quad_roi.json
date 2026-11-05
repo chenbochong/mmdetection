@@ -1,5 +1,5 @@
 {
-  "checkpoint": "C:\\OculiProjects\\mmdetection\\work_dirs\\quad_roi_detector_v3\\best_coco_bbox_mAP_50_epoch_8.pth",
+  "checkpoint": "C:\\OculiProjects\\mmdetection\\work_dirs\\quad_roi_detector_v3_hardneg\\best_coco_bbox_mAP_50_epoch_9.pth",
   "config": "C:\\OculiProjects\\mmdetection\\configs\\ambient_train\\quad_roi_detector_v3.py",
   "nms_iou": 0.5,
   "max_per_img": 64,
