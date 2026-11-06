@@ -1,7 +1,7 @@
 {
   "version": 4,
   "packed_size": 24,
-  "checkpoint": "C:\\OculiProjects\\mmdetection\\work_dirs\\quad_roi_detector_v4\\best_coco_bbox_mAP_50_epoch_11.pth",
+  "checkpoint": "C:\\OculiProjects\\mmdetection\\work_dirs\\quad_roi_detector_v4\\epoch_25.pth",
   "nms_iou": 0.5,
   "max_per_img": 64,
   "ambient_topk": 64,
